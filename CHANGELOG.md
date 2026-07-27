@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 - Plugin webapp showed "no data" for `environment.wind.speedTrue`/`angleTrueWater` and boat speed for any non-admin/anonymous user, even though the same values were visible in the server's data browser. All `registerWithRouter` routes defaulted to admin-only, so every `GET` call the webapp makes (`/status`, `/live`, `/meta`, `/settings`, `/polars`, etc.) returned 401 unless the browser had an admin session. GET endpoints now register through `router.access('readonly')` (signalk-server >= 2.30.0), matching how the core data browser already exposes read access without requiring login; falls back to the previous admin-only behavior on older servers that don't support `access()`.
+- One input (observed on `environment.wind.speedTrue`) could occasionally never receive its first delta after `start()` — a subscription race in the underlying subscription mechanism — leaving that input stuck at no data indefinitely even while the path was actively updating and the plugin's other inputs subscribed fine. A restart of the plugin always cleared it, confirming the race. Added a subscription watchdog: any input still without data 15s after `start()` is automatically resubscribed, with a plugin error surfaced if it's still stuck 15s after that.
 
 ## [1.2.1] - 2026-07-25
 

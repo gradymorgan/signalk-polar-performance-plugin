@@ -52,6 +52,7 @@ module.exports = (app) => {
   let bspSmoother = null
   let hdgSmoother = null
   let metaSentPaths = new Set()  // tracks paths that have had metadata emitted
+  let watchdogTimers = []  // pending subscription-watchdog timeouts; cleared on stop()
 
   // Last-computed output values, updated by computeAndSend on every cycle.
   // Keys match the settings keys; values are SI numbers or null.
@@ -232,6 +233,42 @@ module.exports = (app) => {
     app.handleMessage(plugin.id, {
       updates: [{ values: allPaths.map(path => ({ path, value: null })) }]
     })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Subscription watchdog — occasionally a handler's subscription to its
+  // Signal K path never attaches during start() (a startup race in the
+  // underlying subscription mechanism), leaving it stuck with no data
+  // forever even though the path is actively updating elsewhere. Give each
+  // handler a grace period to receive its first delta; if it hasn't, force
+  // a resubscribe. If it's still stuck after a second grace period, surface
+  // a plugin error instead of failing silently.
+  // ---------------------------------------------------------------------------
+
+  const SUBSCRIPTION_WATCHDOG_MS = 15000
+
+  function watchdogHandler(handler, label) {
+    if (!handler || handler.ready) return
+    app.debug(`No data received yet for ${label} (${handler.path}) — forcing resubscribe`)
+    handler.terminate(false)
+    handler.subscribe()
+    watchdogTimers.push(setTimeout(() => {
+      if (!handler.ready) {
+        app.setPluginError(`No data received for ${label} (${handler.path}) after resubscribe — check the source`)
+      }
+    }, SUBSCRIPTION_WATCHDOG_MS))
+  }
+
+  function scheduleSubscriptionWatchdog() {
+    watchdogTimers.push(setTimeout(() => {
+      if (!isRunning) return
+      if (windSmoother) {
+        watchdogHandler(windSmoother.polar.magnitudeHandler, 'true wind speed')
+        watchdogHandler(windSmoother.polar.angleHandler, 'true wind angle')
+      }
+      if (bspSmoother) watchdogHandler(bspSmoother.handler, 'boat speed')
+      if (hdgSmoother) watchdogHandler(hdgSmoother.handler, 'heading')
+    }, SUBSCRIPTION_WATCHDOG_MS))
   }
 
   // ---------------------------------------------------------------------------
@@ -1071,6 +1108,8 @@ module.exports = (app) => {
 
     start(options) {
       metaSentPaths = new Set()  // reset so metadata is re-emitted after restart
+      watchdogTimers.forEach(clearTimeout)
+      watchdogTimers = []
 
       store = new PolarFileStore(app.getDataDirPath())
       importService = new ImportService(store)
@@ -1140,11 +1179,14 @@ module.exports = (app) => {
       windSmoother.onChange = computeAndSend
 
       isRunning = true
+      scheduleSubscriptionWatchdog()
       app.debug('Plugin started')
     },
 
     stop() {
       isRunning = false
+      watchdogTimers.forEach(clearTimeout)
+      watchdogTimers = []
       importService = null
       nullifyOutputs()
       if (windSmoother) { windSmoother.terminate(); windSmoother = null }
