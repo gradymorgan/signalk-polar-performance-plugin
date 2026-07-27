@@ -186,6 +186,34 @@ function makeRouter() {
   }
 }
 
+// Mimics signalk-server >= 2.30.0's PluginRouter: .access(level) returns a
+// registrar whose registrations are recorded (path -> level) alongside the
+// plain routes object, so tests can assert which routes were opened up.
+function makeAccessAwareRouter() {
+  const routes = { get: {}, put: {}, post: {}, delete: {} }
+  const accessLevels = { get: {}, put: {}, post: {}, delete: {}, patch: {} }
+  const router = {
+    routes,
+    accessLevels,
+    use: () => {},
+    get: (path, handler) => { routes.get[path] = handler },
+    put: (path, handler) => { routes.put[path] = handler },
+    post: (path, handler) => { routes.post[path] = handler },
+    delete: (path, handler) => { routes.delete[path] = handler }
+  }
+  router.access = (level) => {
+    const registrar = {
+      get: (path, handler) => { routes.get[path] = handler; accessLevels.get[path] = level; return registrar },
+      put: (path, handler) => { routes.put[path] = handler; accessLevels.put[path] = level; return registrar },
+      post: (path, handler) => { routes.post[path] = handler; accessLevels.post[path] = level; return registrar },
+      patch: (path, handler) => { accessLevels.patch[path] = level; return registrar },
+      delete: (path, handler) => { routes.delete[path] = handler; accessLevels.delete[path] = level; return registrar }
+    }
+    return registrar
+  }
+  return router
+}
+
 function makeResponse() {
   return {
     statusCode: 200,
@@ -498,5 +526,82 @@ describe('Polar manager/query API', () => {
     }, res)
     assert.equal(res.statusCode, 503)
     assert.ok(res.body.error.includes('No internet'))
+  })
+})
+
+// Regression test for the reported bug: with security enabled, an
+// unauthenticated/non-admin user viewing the plugin's webapp got "no data"
+// for environment.wind.speedTrue etc. even though the value was visible in
+// the data browser — because every plugin route (including plain data
+// reads) defaulted to admin-only. Fixed by routing GET endpoints through
+// router.access('readonly') where the host server supports it.
+describe('Route access levels (readonly GET endpoints)', () => {
+  let dataDir, app, plugin, router
+
+  beforeEach(() => {
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'polar-access-'))
+    app = makeApp(dataDir)
+    plugin = freshPlugin(app)
+    router = makeAccessAwareRouter()
+    plugin.registerWithRouter(router)
+    plugin.start({})
+  })
+
+  afterEach(() => {
+    try { plugin.stop() } catch (_) {}
+    fs.rmSync(dataDir, { recursive: true, force: true })
+    delete require.cache[require.resolve('../plugin/index.js')]
+  })
+
+  const READONLY_GET_PATHS = [
+    '/polars/active',
+    '/imports/formats',
+    '/internet',
+    '/imports/sources',
+    '/imports/sources/:source/search',
+    '/polars/:id/axes/tws',
+    '/polars/:id/queries/curve',
+    '/polars/:id/queries/speed',
+    '/polars/:id/queries/targets',
+    '/polars/:id/queries/performance',
+    '/polars/:id/meta',
+    '/live',
+    '/status',
+    '/meta',
+    '/settings',
+    '/polars',
+    '/polars/:id'
+  ]
+
+  it('registers every GET endpoint at readonly access when the router supports access()', () => {
+    for (const p of READONLY_GET_PATHS) {
+      assert.equal(router.accessLevels.get[p], 'readonly', `expected ${p} to be registered as readonly`)
+    }
+  })
+
+  it('leaves mutating endpoints (PUT/POST/DELETE) at the default admin-only access', () => {
+    assert.equal(router.accessLevels.put['/polars/active'], undefined)
+    assert.equal(router.accessLevels.delete['/polars/active'], undefined)
+    assert.equal(router.accessLevels.post['/polars'], undefined)
+    assert.equal(router.accessLevels.put['/settings'], undefined)
+    assert.equal(router.accessLevels.put['/polars/:id'], undefined)
+    assert.equal(router.accessLevels.delete['/polars/:id'], undefined)
+  })
+
+  it('still falls back to plain admin-only registration on routers without access()', () => {
+    const dataDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'polar-access-fallback-'))
+    const app2 = makeApp(dataDir2)
+    const plugin2 = freshPlugin(app2)
+    const plainRouter = makeRouter()
+    plugin2.registerWithRouter(plainRouter)
+    plugin2.start({})
+    try {
+      assert.equal(typeof plainRouter.routes.get['/status'], 'function')
+      assert.equal(typeof plainRouter.routes.get['/live'], 'function')
+    } finally {
+      plugin2.stop()
+      fs.rmSync(dataDir2, { recursive: true, force: true })
+      delete require.cache[require.resolve('../plugin/index.js')]
+    }
   })
 })

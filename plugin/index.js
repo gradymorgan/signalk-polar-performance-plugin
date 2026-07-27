@@ -634,7 +634,16 @@ module.exports = (app) => {
         next()
       })
 
-      router.get('/polars/active', (req, res) => {
+      // Read-only endpoints (live data, polar listings/queries, settings/meta
+      // reads) are opened up to readonly/readwrite users via router.access()
+      // (signalk-server >= 2.30.0) so the webapp can display live wind/boat
+      // speed without requiring an admin login — matching how the built-in
+      // data browser already exposes these values without auth. Falls back
+      // to the plain admin-only router on older servers that don't support
+      // access() yet, which preserves the previous (admin-required) behavior.
+      const readRouter = typeof router.access === 'function' ? router.access('readonly') : router
+
+      readRouter.get('/polars/active', (req, res) => {
         if (!settings.activePolar) {
           return res.status(404).json({ error: 'No polar is currently active' })
         }
@@ -683,15 +692,15 @@ module.exports = (app) => {
         res.json({ id: '' })
       })
 
-      router.get('/imports/formats', (_req, res) => {
+      readRouter.get('/imports/formats', (_req, res) => {
         res.json(getImportService().listFormats())
       })
 
-      router.get('/internet', async (_req, res) => {
+      readRouter.get('/internet', async (_req, res) => {
         res.json({ online: await checkInternet() })
       })
 
-      router.get('/imports/sources', (_req, res) => {
+      readRouter.get('/imports/sources', (_req, res) => {
         res.json(getImportService().listSources())
       })
 
@@ -725,7 +734,7 @@ module.exports = (app) => {
         }
       })
 
-      router.get('/imports/sources/:source/search', async (req, res) => {
+      readRouter.get('/imports/sources/:source/search', async (req, res) => {
         if (!await checkInternet()) {
           return res.status(503).json({ error: 'No internet connection — external source imports are unavailable' })
         }
@@ -755,7 +764,7 @@ module.exports = (app) => {
         }
       })
 
-      router.get('/polars/:id/axes/tws', (req, res) => {
+      readRouter.get('/polars/:id/axes/tws', (req, res) => {
         try {
           const table = loadStoredPolar(req.params.id)
           res.json(getPolarTwsValues(table))
@@ -764,7 +773,7 @@ module.exports = (app) => {
         }
       })
 
-      router.get('/polars/:id/queries/curve', (req, res) => {
+      readRouter.get('/polars/:id/queries/curve', (req, res) => {
         try {
           const table = loadPolarCached(req.params.id)
           const tws = parseFloat(req.query.tws)
@@ -781,7 +790,7 @@ module.exports = (app) => {
         }
       })
 
-      router.get('/polars/:id/queries/speed', (req, res) => {
+      readRouter.get('/polars/:id/queries/speed', (req, res) => {
         try {
           const table = loadPolarCached(req.params.id)
           const tws = parseFloat(req.query.tws)
@@ -795,7 +804,7 @@ module.exports = (app) => {
         }
       })
 
-      router.get('/polars/:id/queries/targets', (req, res) => {
+      readRouter.get('/polars/:id/queries/targets', (req, res) => {
         try {
           const table = loadPolarCached(req.params.id)
           const tws = parseFloat(req.query.tws)
@@ -808,7 +817,7 @@ module.exports = (app) => {
         }
       })
 
-      router.get('/polars/:id/queries/performance', (req, res) => {
+      readRouter.get('/polars/:id/queries/performance', (req, res) => {
         try {
           const table = loadPolarCached(req.params.id)
           const tws = parseFloat(req.query.tws)
@@ -823,7 +832,7 @@ module.exports = (app) => {
         }
       })
 
-      router.get('/polars/:id/meta', (req, res) => {
+      readRouter.get('/polars/:id/meta', (req, res) => {
         try {
           const polarStore = getStore()
           const table = polarStore.load(req.params.id)
@@ -849,7 +858,7 @@ module.exports = (app) => {
       // tws/bsp/polarSpeed in m/s; twa in rad (positive = starboard, negative = port).
       // Returns null for any field not yet available (plugin not running,
       // no BSP source, polar not loaded, or boat in irons).
-      router.get('/live', (req, res) => {
+      readRouter.get('/live', (req, res) => {
         const wind = windSmoother ? windSmoother.polarValue : null
         const TWS       = wind ? wind.magnitude : null
         const TWAsigned = wind ? wind.angle : null
@@ -887,7 +896,7 @@ module.exports = (app) => {
       // inputs.smoothed.* — value the plugin actually used for computation
       // outputs.*     — only present for enabled settings; null if polar not ready
       // polarState    — same as /live
-      router.get('/status', (req, res) => {
+      readRouter.get('/status', (req, res) => {
         const si = v => (Number.isFinite(v) ? parseFloat(v.toFixed(5)) : null)
 
         // Raw inputs: read directly from the smoother handlers
@@ -949,7 +958,7 @@ module.exports = (app) => {
       // returned by /live and the canonical curve query endpoints. displayUnits are fetched from the
       // SK server's path metadata so user unit preferences (kn vs m/s etc.) are
       // respected. Falls back to safe defaults when SK metadata is unavailable.
-      router.get('/meta', (req, res) => {
+      readRouter.get('/meta', (req, res) => {
         const speed = { formula: 'value * 1.943844', symbol: 'kn', displayFormat: '0.0' }
         const angle = { formula: 'value * 57.29577951308231', symbol: '\u00b0', displayFormat: '0.0' }
         const ratio = { formula: 'value * 100', symbol: '%', displayFormat: '0.1' }
@@ -968,7 +977,7 @@ module.exports = (app) => {
 
       // ---- Runtime settings ------------------------------------------------
 
-      router.get('/settings', (req, res) => {
+      readRouter.get('/settings', (req, res) => {
         // Merge pending staged changes so the client always sees the latest
         // intended state even before the next wind update drains them.
         res.json({ ...settings, ...changedOptions, _defaults: DEFAULT_SETTINGS })
@@ -990,7 +999,7 @@ module.exports = (app) => {
 
       // ---- Polar file operations -------------------------------------------
 
-      router.get('/polars', (req, res) => {
+      readRouter.get('/polars', (req, res) => {
         try {
           const polarStore = getStore()
           const polars = polarStore.list().map((id) => {
@@ -1010,7 +1019,7 @@ module.exports = (app) => {
         }
       })
 
-      router.get('/polars/:id', (req, res) => {
+      readRouter.get('/polars/:id', (req, res) => {
         try {
           const stored = getStore().readObject(req.params.id)
           res.json({ ...stored, id: req.params.id })
