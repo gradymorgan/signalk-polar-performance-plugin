@@ -236,39 +236,53 @@ module.exports = (app) => {
   }
 
   // ---------------------------------------------------------------------------
-  // Subscription watchdog — occasionally a handler's subscription to its
-  // Signal K path never attaches during start() (a startup race in the
-  // underlying subscription mechanism), leaving it stuck with no data
-  // forever even though the path is actively updating elsewhere. Give each
-  // handler a grace period to receive its first delta; if it hasn't, force
-  // a resubscribe. If it's still stuck after a second grace period, surface
-  // a plugin error instead of failing silently.
+  // Subscription watchdog — a handler's subscription to its Signal K path can
+  // fail to attach during start() (e.g. a startup race in the underlying
+  // subscription mechanism, or the upstream source — a wind calculator that
+  // needs GPS/apparent-wind/boat-speed first — simply hasn't started
+  // publishing yet), leaving it stuck with no data indefinitely even though
+  // the path is actively updating moments later. A single retry isn't
+  // enough: if the source starts publishing after that one retry's grace
+  // period, nothing is listening for it anymore. Resubscribe attempts are
+  // cheap (just a fresh subscription request), so retry forever: quickly at
+  // first, backing off to a steady 30s poll. A one-time status note (not a
+  // hard error — retries keep going) is surfaced if it's been stuck for a
+  // long while, so a genuine misconfiguration doesn't stay silently invisible.
   // ---------------------------------------------------------------------------
 
-  const SUBSCRIPTION_WATCHDOG_MS = 15000
+  const SUBSCRIPTION_WATCHDOG_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000]
+  const SUBSCRIPTION_WATCHDOG_WARN_AFTER_MS = 5 * 60 * 1000
 
-  function watchdogHandler(handler, label) {
-    if (!handler || handler.ready) return
-    app.debug(`No data received yet for ${label} (${handler.path}) — forcing resubscribe`)
-    handler.terminate(false)
-    handler.subscribe()
-    watchdogTimers.push(setTimeout(() => {
-      if (!handler.ready) {
-        app.setPluginError(`No data received for ${label} (${handler.path}) after resubscribe — check the source`)
+  function watchHandler(handler, label) {
+    let attempts = 0
+    let elapsedMs = 0
+    let warned = false
+    function check() {
+      if (!isRunning || handler.ready) return  // healthy (or stopped) — done watching
+      attempts++
+      app.debug(`No data yet for ${label} (${handler.path}) — resubscribe attempt ${attempts}`)
+      handler.terminate(false)
+      handler.subscribe()
+      const delay = SUBSCRIPTION_WATCHDOG_BACKOFF_MS[
+        Math.min(attempts, SUBSCRIPTION_WATCHDOG_BACKOFF_MS.length - 1)
+      ]
+      elapsedMs += delay
+      if (!warned && elapsedMs >= SUBSCRIPTION_WATCHDOG_WARN_AFTER_MS) {
+        warned = true
+        app.setPluginError(`No data received for ${label} (${handler.path}) after ${Math.round(elapsedMs / 1000)}s — still retrying, check the source`)
       }
-    }, SUBSCRIPTION_WATCHDOG_MS))
+      watchdogTimers.push(setTimeout(check, delay))
+    }
+    watchdogTimers.push(setTimeout(check, SUBSCRIPTION_WATCHDOG_BACKOFF_MS[0]))
   }
 
   function scheduleSubscriptionWatchdog() {
-    watchdogTimers.push(setTimeout(() => {
-      if (!isRunning) return
-      if (windSmoother) {
-        watchdogHandler(windSmoother.polar.magnitudeHandler, 'true wind speed')
-        watchdogHandler(windSmoother.polar.angleHandler, 'true wind angle')
-      }
-      if (bspSmoother) watchdogHandler(bspSmoother.handler, 'boat speed')
-      if (hdgSmoother) watchdogHandler(hdgSmoother.handler, 'heading')
-    }, SUBSCRIPTION_WATCHDOG_MS))
+    if (windSmoother) {
+      watchHandler(windSmoother.polar.magnitudeHandler, 'true wind speed')
+      watchHandler(windSmoother.polar.angleHandler, 'true wind angle')
+    }
+    if (bspSmoother) watchHandler(bspSmoother.handler, 'boat speed')
+    if (hdgSmoother) watchHandler(hdgSmoother.handler, 'heading')
   }
 
   // ---------------------------------------------------------------------------
